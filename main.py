@@ -1,9 +1,9 @@
 from Networks.ARNet import ARNet
-
+from Networks.IdentificationNetwork import IdentificationNet
 from DeepTorch import Trainer as trn
 from DeepTorch.Datasets.SequentialDataset import SequentialDataset
 from DeepTorch.Datasets.NumericalDataset import NumericalDataset
-from DeepTorch.Functions.regularizations import sparse_regularization
+from DeepTorch.Functions.regularizations import sparse_regularization, L2_regularization
 import torch
 import torch.nn as nn
 from scipy.io import loadmat
@@ -11,7 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 TRAIN = True
-RESUME_TRAINING = False
+RESUME_TRAINING = True
 TEST = True
 NON_LINEAR = False
 MODEL_NAME = "./models/nn/nn_filter"
@@ -19,7 +19,7 @@ if NON_LINEAR:
     DATASET = "./data/nl_dataset.mat"
     MODEL_NAME = MODEL_NAME + "_nl"
 else:
-    DATASET = "./data/dataset.mat"
+    DATASET = "./data/dataset3.mat"
 
 # Load data
 dataset = loadmat(DATASET)
@@ -27,34 +27,37 @@ train = dataset["tr_out"][0][0]
 val = dataset["val_out"][0][0]
 test = dataset["test_out"][0][0]
 
-tr_reg = np.array([train["y2"], train["y2_1"], train["y2_2"], train["y2_3"], train["y1_1"], train["y1_2"], train["y1_3"]])
+tr_reg = np.array([train["y2"]])
 tr_reg = np.transpose(tr_reg).squeeze(0)
 tr_labels = np.array(train["y1"])
 
-val_reg = np.array([val["y2"], val["y2_1"], val["y2_2"], val["y2_3"], val["y1_1"], val["y1_2"], val["y1_3"]])
+val_reg = np.array([val["y2"]])
 val_reg = np.transpose(val_reg).squeeze(0)
 val_labels = np.array(val["y1"])
 
-test_reg = np.array([test["y2"], test["y2_1"], test["y2_2"], test["y2_3"], test["y1_1"], test["y1_2"], test["y1_3"]])
+test_reg = np.array([test["y2"]])
 test_reg = np.transpose(test_reg).squeeze(0)
 test_labels = np.array(test["y1"])
 
-train_dataset = SequentialDataset(tr_reg, tr_labels, n_points=100, batch_size=1000)
-validation_dataset = SequentialDataset(val_reg, val_labels, n_points=100)
+train_dataset = SequentialDataset(tr_reg, tr_labels, n_points=1000, batch_size=-1)
+validation_dataset = SequentialDataset(val_reg, val_labels, n_points=1000, batch_size=-1)
 test_dataset = SequentialDataset(test_reg, test_labels, n_points=1)
 test_dataset.batch_index = 0
 
-net = ARNet(7, 1, 4)
+net = IdentificationNet(1, 1, 3)
 net.to("cuda:0")
 net.reset()
+
+def loss_fnc(pred, batch_labels):
+    return torch.mean(torch.square(pred - batch_labels))
 
 if TRAIN:
     trn_opts = trn.TrainingOptions()
     if NON_LINEAR:
         trn_opts.batch_size = 5000
-        trn_opts.learning_rate = 0.01
+        trn_opts.learning_rate = 0.001
         trn_opts.learning_rate_drop_type = trn.SchedulerType.StepLr
-        trn_opts.learning_rate_drop_factor = 0.99
+        trn_opts.learning_rate_drop_factor = 1
         trn_opts.learning_rate_drop_step_count = 100
         trn_opts.n_epochs = 5000
         trn_opts.l2_reg_constant = 1E-2
@@ -65,12 +68,12 @@ if TRAIN:
     else:
 
         #These optiosn work best for linear case
-        trn_opts.batch_size = 1000
+        trn_opts.batch_size = -1
         trn_opts.learning_rate = 0.001
         trn_opts.learning_rate_drop_type = trn.SchedulerType.StepLr
-        trn_opts.learning_rate_drop_factor = 0.999
-        trn_opts.learning_rate_drop_step_count = 500
-        trn_opts.n_epochs = 20
+        trn_opts.learning_rate_drop_factor = 0.9
+        trn_opts.learning_rate_drop_step_count = 50
+        trn_opts.n_epochs = 1000
         trn_opts.l2_reg_constant = 0.0001
         trn_opts.saved_model_name = MODEL_NAME
         trn_opts.save_model = True
@@ -81,12 +84,14 @@ if TRAIN:
         trn_opts.regularization_method = None
         trn_opts.shuffle_data = True
         trn_opts.regularization_hyperparams = [0.01, 0.1]
+        trn_opts.validation_batch_size = -1
+        trn_opts.weight_decay = 0
 
     trainer = trn.Trainer(net, trn_opts)
     if RESUME_TRAINING:
         net.load_state_dict(torch.load(MODEL_NAME))
-    with torch.autograd.set_detect_anomaly(True):
-        trainer.train(torch.nn.MSELoss(), train_dataset, validation_set=None)
+    print(train_dataset.get_iter_count())
+    trainer.train(loss_fnc, train_dataset, validation_set=validation_dataset)
 
 
     print("Done")
@@ -96,32 +101,29 @@ if TEST:
     net.n_points = 1
     net.reset()
     net.output_feedback = True
-    test_dataset.batch_size = -1
-    test_dataset.batch_index = 0
-    regs, _ = test_dataset.get_batch(-1, 0, "cuda:0")
-    test_preds = net.forward(regs).detach().cpu().numpy()
-
+    regs, labels = test_dataset.get_batch(-1, 0, "cuda:0")
+    test_preds = net.forward(regs).detach().cpu().numpy().squeeze(0)
+    test_labels = labels.detach().cpu().numpy().squeeze(0)
     # Regular Test
     # test_regs, test_labels = test_dataset.get_batch(-1, 0, device="cuda:0")
     # test_preds = net.forward(test_regs).detach().cpu().numpy()
-    test_preds = np.array(test_preds).squeeze(2)
-    mse = np.mean(np.square(np.array(test["y1"]) - np.array(test_preds)))
+    mse = np.mean(np.square(test_labels - test_preds))
     plt.figure()
-    plt.plot(np.array(test["y1"]))
-    plt.legend("Y1")
+    plt.plot(np.array(test_labels))
     plt.plot(np.array(test_preds))
-    plt.legend("Prediction")
+    plt.plot(np.array(test["y2"]))
+    plt.legend(("Labels", "Prediction", "Y2"))
     plt.title("Regular Test - MSE:{}".format(mse))
     plt.show()
 
 
 
-    # # In place Test 1
-    # '''
-    # In this test, y2 inputs are fed into F(s) and the results are compared with y1
-    # '''
+    # In place Test 1
+    '''
+    In this test, y2 inputs are fed into F(s) and the results are compared with y1
+    '''
     # net.reset()  # Reset states
-    # test_inputs = np.transpose([test["y2"], test["y2_1"], test["y2_2"], test["y2_3"]]).squeeze(0)
+    # test_inputs = np.transpose([test["y2"]]).squeeze(0)
     # past_preds = [0, 0, 0]
     # preds = []
     # for i in range(len(test["tout"])):
